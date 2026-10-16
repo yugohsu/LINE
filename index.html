@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <title>下雨通知</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+
+  <!-- 加到 iPhone 主畫面時的名稱、圖示、顏色 -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="下雨通知">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="theme-color" content="#f2eee6">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+  <link rel="manifest" href="manifest.json">
+
+  <style>
+    html, body { margin: 0; height: 100%; background: #f2eee6; }
+    body { overflow: hidden; }
+    iframe {
+      position: fixed; inset: 0; width: 100%; height: 100%; border: 0;
+      padding-top: env(safe-area-inset-top); box-sizing: border-box; background: #f2eee6;
+    }
+    #loading {
+      position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 14px; font-family: -apple-system, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+      color: #7d7263; font-size: 14px; background: #f2eee6; transition: opacity .3s;
+    }
+    #loading img { width: 72px; height: 72px; border-radius: 18px; }
+    #loading a { color: #9a7432; }
+  </style>
+</head>
+<body>
+  <div id="loading">
+    <img src="icon-192.png" alt="">
+    <div>載入中…</div>
+    <a id="direct" href="#" style="display:none">太久沒反應？點這裡直接打開</a>
+  </div>
+
+  <iframe id="app" title="下雨通知" allow="geolocation; clipboard-write"></iframe>
+
+  <script>
+    // ===== 把這一行換成你自己的 Apps Script 網址 (/exec 結尾) =====
+    var APP_URL = 'https://script.google.com/macros/s/AKfycbwGL9LSy0zDw0fS83oVSOL-RSoce7PQUjJQgvs216_TqxmF3VEbNTH7yOlSiEV9mc6dWg/exec';
+
+    var frame = document.getElementById('app');
+    var loading = document.getElementById('loading');
+    var direct = document.getElementById('direct');
+    direct.href = APP_URL;
+
+    frame.onload = function () {
+      loading.style.opacity = '0';
+      setTimeout(function () { loading.style.display = 'none'; }, 300);
+    };
+    // 8 秒還沒載入，顯示「直接打開」的連結
+    setTimeout(function () { direct.style.display = 'inline'; }, 8000);
+
+    frame.src = APP_URL;
+  </script>
+</body>
+</html>
