@@ -143,7 +143,7 @@ function analyze(w) {
     return Object.assign(base, {
       mode: 'raining', icon: cur.snow > 0 ? '❄️' : '🌧️',
       big: '正在' + level(cur.mm, cur.snow),
-      small: b.end ? '下到 ' + hm(b.end) + '（約' + minText((b.end - now) / 60000) + '）' : '會一直下 ☔'
+      small: b.end ? '下到 ' + hm(b.end) : '會一直下 ☔'
     });
   }
 
@@ -153,11 +153,10 @@ function analyze(w) {
     const first = slots[fi];
     const b = block(fi);
     const min = Math.max(0, (first.start - now) / 60000);
-    const range = hm(first.start) + '～' + (b.end ? hm(b.end) : '很久') + ' ' + b.word;
     return Object.assign(base, {
       mode: 'soon', icon: first.snow > 0 ? '❄️' : '🌦️',
-      big: min < 10 ? '快' + b.word + '了' : minText(min) + '後',
-      small: range
+      big: min < 10 ? '快' + b.word + '了' : minText(min) + '後 ' + b.word,
+      small: hm(first.start) + '～' + (b.end ? hm(b.end) : '很久')
     });
   }
 
@@ -171,8 +170,8 @@ function analyze(w) {
     const endT = day[lj].start + 3600000;
     return Object.assign(base, {
       mode: 'dry', icon: '⛅',
-      big: minText(Math.max(60, (later.start - now) / 60000)) + '後',
-      small: hm(later.start) + '～' + hm(endT) + (day.slice(li, lj + 1).some(x => x.snow > 0) ? ' 可能下雪' : ' 可能下雨')
+      big: minText(Math.max(60, (later.start - now) / 60000)) + '後 ' + (day.slice(li, lj + 1).some(x => x.snow > 0) ? '下雪' : '下雨'),
+      small: hm(later.start) + '～' + hm(endT) + '（機率 ' + Math.max(...day.slice(li, lj + 1).map(x => x.prob)) + '%）'
     });
   }
   return Object.assign(base, { mode: 'dry', icon: '☀️', big: '不會下雨', small: '未來 24 小時' });
@@ -246,17 +245,19 @@ function buildWidget(r, place) {
 
   if (family === 'small') {
     // ===== 正方形 =====
+    // 第 1 行：🌦️ 44分後 大雨
+    // 第 2 行：17:15～18:15
+    // 第 3 行：24 小時降雨長條 + 時間
+    // 第 4 行：📌 地點
     w.setPadding(12, 12, 10, 12);
-    headline(w, r, 26, 15);
-    w.addSpacer(3);
-    addText(w, r.info, 12, C.muted, 'bold');
+    headline(w, r, 24, 20);
     w.addSpacer();
-    const img = w.addImage(drawDay(r.day, 130, 34));
-    img.imageSize = new Size(130, 34);
+    const img = w.addImage(drawDay(r.day, 130, 40));
+    img.imageSize = new Size(130, 40);
     w.addSpacer(2);
     timeLabels(w, r.day, 130, 10);
-    w.addSpacer(3);
-    addText(w, place + ' ' + hm(Date.now()), 10, C.muted, 'bold');
+    w.addSpacer(4);
+    addText(w, place, 13, C.muted, 'bold');
     return w;
   }
 
@@ -265,10 +266,7 @@ function buildWidget(r, place) {
   const row = w.addStack();
   const left = row.addStack();
   left.layoutVertically();
-  headline(left, r, 30, 17);
-  left.addSpacer(6);
-  addText(left, '未來 24 小時', 13, C.muted, 'bold');
-  addText(left, r.info, 14, C.ink, 'bold');
+  headline(left, r, 28, 22);
   row.addSpacer(12);
 
   const right = row.addStack();
@@ -280,7 +278,7 @@ function buildWidget(r, place) {
   timeLabels(right, r.day, 150, 11);
 
   w.addSpacer();
-  addText(w, place + '　更新 ' + hm(Date.now()), 12, C.muted, 'bold');
+  addText(w, place, 14, C.muted, 'bold');
   return w;
 }
 
