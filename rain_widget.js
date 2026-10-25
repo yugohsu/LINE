@@ -214,6 +214,14 @@ function addText(stack, text, size, color, weight) {
   return t;
 }
 
+// 置中的一行字 (左右各放一個彈性空白)
+function centerText(stack, text, size) {
+  const row = stack.addStack();
+  row.addSpacer();
+  addText(row, text, size, C.muted, 'bold');
+  row.addSpacer();
+}
+
 // 長條下面的時間 (現在 / 12 小時後 / 24 小時後)
 function timeLabels(stack, day, width, size) {
   const row = stack.addStack();
@@ -257,7 +265,7 @@ function buildWidget(r, place) {
     w.addSpacer(2);
     timeLabels(w, r.day, 130, 10);
     w.addSpacer(4);
-    addText(w, place, 13, C.muted, 'bold');
+    centerText(w, place, 13);
     return w;
   }
 
@@ -278,7 +286,7 @@ function buildWidget(r, place) {
   timeLabels(right, r.day, 150, 11);
 
   w.addSpacer();
-  addText(w, place, 14, C.muted, 'bold');
+  centerText(w, place, 14);
   return w;
 }
 
