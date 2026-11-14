@@ -372,26 +372,30 @@ function buildWidget(r, place) {
     return w;
   }
 
-  // ===== 中 / 大：上面文字，下面整排 24 小時長條 =====
+  // ===== 中 / 大 =====
+  // 第 1 行：不會下雨　未來 24 小時　　　　　　金竹里 (右上角)
+  // 第 2 行：24 小時降雨長條，從左到右整排 (每小時一格 + 時間)
   const isLarge = family === 'large' || family === 'extraLarge';
-  const chartW = 296;
-  const barH = isLarge ? 150 : 44;
+  const chartW = 304;
+  const barH = isLarge ? 160 : 58;
   const fontSize = isLarge ? 12 : 10;
-  w.setPadding(12, 14, 10, 14);
+  w.setPadding(12, 12, 10, 12);
 
   const top = w.addStack();
   top.centerAlignContent();
   addText(top, r.big, isLarge ? 32 : 26, bigColor(r), 'heavy');
-  top.addSpacer(10);
-  addText(top, r.small, isLarge ? 22 : 18, C.ink, 'bold');
+  top.addSpacer(8);
+  const sm = addText(top, r.small, isLarge ? 20 : 16, C.ink, 'bold');
+  sm.minimumScaleFactor = 0.6;
   top.addSpacer();
+  const pl = addText(top, place, isLarge ? 16 : 14, C.muted, 'bold');
+  pl.rightAlignText();
 
   w.addSpacer();
   const img = w.addImage(drawDay(r.day, WIDE_HOURS, chartW, barH, fontSize));
   img.imageSize = new Size(chartW, barH + 3 + fontSize + 3);
   img.centerAlignImage();
-  w.addSpacer(4);
-  centerText(w, place, 14);
+  w.addSpacer(2);
   return w;
 }
 
