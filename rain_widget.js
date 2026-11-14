@@ -1,6 +1,7 @@
 // 多久會下雨 — iPhone 主畫面小工具 (Scriptable)
-// 小 (正方形)：多久下雨 + 未來 12 小時降雨長條 (每小時一格，每格都有時間)
-// 中 / 大 (長方形)：同樣內容，未來 24 小時降雨長條 (每小時一格，每格都有時間)
+// 小 (正方形)：現在天氣 + 未來 12 小時降雨長條
+// 中 / 大 (長方形)：第 1 行 現在天氣 + 多久下雨，地點在右上角
+//                  第 2 行 未來 24 小時降雨長條 (每小時一條刻度，每 3 小時標幾點；白天黃底、晚上藍灰底)
 //
 // 換地點：點一下小工具 → 選「搜尋地點」→ 輸入地名 → 選結果
 //         選「改回現在位置」就恢復用手機定位
@@ -14,6 +15,7 @@ const SNOW_RATIO = 0.7;                               // 雪佔降水 70% 以上
 const MIX_RATIO = 0.3;                                // 雪佔 30%~70% = 雨夾雪；低於 30% = 下雨
 const SMALL_HOURS = 12;                               // 正方形小工具顯示幾小時
 const WIDE_HOURS = 24;                                // 長方形小工具顯示幾小時
+const LABEL_EVERY = 3;                                // 每幾小時標一次時間數字 (1 = 每小時都標，字會比較小)
 const REFRESH_MIN = 10;                               // 希望幾分鐘更新一次 (iPhone 會自己決定，通常 10~30 分)
 // 下雨通知 Apps Script 網址 (用來把中文地名換成經緯度)
 const GAS_URL = 'https://script.google.com/macros/s/AKfycbwGL9LSy0zDw0fS83oVSOL-RSoce7PQUjJQgvs216_TqxmF3VEbNTH7yOlSiEV9mc6dWg/exec';
@@ -24,13 +26,16 @@ const C = {
   rainBg: new Color('#e3edf8'),
   ink: new Color('#2a2117'),
   muted: new Color('#7d7263'),
-  gold: new Color('#9a7432'),
+  gold: new Color('#9a7432'),        // 晴天
+  cloud: new Color('#6b6f78'),       // 陰天 / 多雲
   rain: new Color('#3a78c2'),
   rainLight: new Color('#a9c6e8'),
   snow: new Color('#7b6fbf'),        // 下雪：薰衣草紫
   snowBg: new Color('#efedf8'),
   track: new Color('#e6dfd2'),
-  tick: new Color('#b9ad9a'),
+  dayTrack: new Color('#f3e1ad'),    // 白天的底色：淡黃
+  nightTrack: new Color('#cfd0e3'),  // 晚上的底色：藍灰
+  tick: new Color('#a89c88'),
   red: new Color('#c24a36')
 };
 
@@ -161,8 +166,9 @@ async function menu() {
 // ---------- 抓天氣 ----------
 async function getWeather(lat, lon) {
   const url = 'https://api.open-meteo.com/v1/forecast?latitude=' + lat.toFixed(4) + '&longitude=' + lon.toFixed(4) +
+    '&current=weather_code,cloud_cover' +
     '&minutely_15=precipitation,rain,snowfall' +
-    '&hourly=precipitation,precipitation_probability,rain,snowfall' +
+    '&hourly=precipitation,precipitation_probability,rain,snowfall,is_day' +
     '&forecast_minutely_15=32&forecast_hours=26&past_minutely_15=1&timezone=auto';
   const d = await new Request(url).loadJSON();
   if (d.error) throw new Error(d.reason || '天氣資料錯誤');
@@ -171,7 +177,10 @@ async function getWeather(lat, lon) {
     const p = s.split(/[-T:]/);
     return Date.UTC(+p[0], +p[1] - 1, +p[2], +p[3], +p[4]) - off * 1000;
   };
+  const cur = d.current || {};
   return {
+    code: cur.weather_code == null ? 0 : cur.weather_code,
+    cloud: cur.cloud_cover == null ? 0 : cur.cloud_cover,
     m: d.minutely_15.time.map((t, i) => ({
       end: ms(t), mm: d.minutely_15.precipitation[i] || 0, snow: d.minutely_15.snowfall[i] || 0,
       rain: (d.minutely_15.rain || [])[i] || 0
@@ -179,12 +188,13 @@ async function getWeather(lat, lon) {
     h: d.hourly.time.map((t, i) => ({
       end: ms(t), mm: d.hourly.precipitation[i] || 0, snow: d.hourly.snowfall[i] || 0,
       rain: (d.hourly.rain || [])[i] || 0,
-      prob: d.hourly.precipitation_probability[i] || 0
+      prob: d.hourly.precipitation_probability[i] || 0,
+      isDay: (d.hourly.is_day || [])[i]
     }))
   };
 }
 
-// ---------- 判斷：多久會下雨 ----------
+// ---------- 判斷 ----------
 const pad = n => String(n).padStart(2, '0');
 const hm = t => { const d = new Date(t); return pad(d.getHours()) + ':' + pad(d.getMinutes()); };
 
@@ -196,35 +206,40 @@ const kindOf = (mm, snow) => {
   return r >= SNOW_RATIO ? 'snow' : r >= MIX_RATIO ? 'mix' : 'rain';
 };
 
-// 15 分鐘的降水 (mm) / 積雪 (cm) → 白話
+// 15 分鐘的降水 (mm) / 積雪 (cm) → 小雨 中雨 大雨 雨夾雪 小雪 中雪 大雪
 const level = (mm, snow) => {
-  if (mm < RAIN_MIN) return '沒雨';
+  if (mm < RAIN_MIN) return '';
   const k = kindOf(mm, snow);
   if (k === 'snow') return snow < 0.2 ? '小雪' : snow < 0.7 ? '中雪' : '大雪';
   if (k === 'mix') return '雨夾雪';
   return mm < 0.5 ? '小雨' : mm < 2 ? '中雨' : '大雨';
 };
+
+// 沒下雨時：晴天 / 多雲 / 陰天
+function skyWord(code, cloud) {
+  if (code === 45 || code === 48) return '陰天';   // 霧
+  if (code >= 3 || cloud >= 80) return '陰天';
+  if (code === 2 || cloud >= 50) return '多雲';
+  return '晴天';
+}
+
 const isSnow = word => word.indexOf('雪') >= 0;
 const minText = min => min >= 60 ? (Math.round(min / 30) / 2).toString() + '小時' : Math.round(min) + '分';
 
 function analyze(w) {
   const now = Date.now();
-  const slots = w.m.map(s => ({ start: s.end - 15 * 60000, end: s.end, mm: s.mm, snow: s.snow, rain: s.rain }))
+  const slots = w.m.map(s => ({ start: s.end - 15 * 60000, end: s.end, mm: s.mm, snow: s.snow }))
     .filter(s => s.end > now);
-  // 只看降水量，一點點雪不算
   const wet = s => s.mm >= RAIN_MIN;
 
   // 未來 24 小時 (每小時一格；包含「現在這一小時」)
-  const day = w.h.filter(x => x.end > now).slice(0, 24).map(x => ({ start: x.end - 3600000, mm: x.mm, snow: x.snow, rain: x.rain, prob: x.prob }));
-  const total = day.reduce((a, x) => a + x.mm, 0);
-  const maxProb = day.reduce((a, x) => Math.max(a, x.prob), 0);
+  const day = w.h.filter(x => x.end > now).slice(0, 24).map(x => ({ start: x.end - 3600000, mm: x.mm, snow: x.snow, prob: x.prob, isDay: x.isDay }));
+  const base = { day };
+  const rank = { '': 0, '小雨': 1, '中雨': 2, '大雨': 3, '雨夾雪': 4, '小雪': 5, '中雪': 6, '大雪': 7 };
 
-  const base = { day, total, maxProb };
-  const cur = slots[0];
-  const rank = { '沒雨': 0, '小雨': 1, '中雨': 2, '大雨': 3, '雨夾雪': 4, '小雪': 5, '中雪': 6, '大雪': 7 };
   // 從第 i 格開始連續下的那一段：最大雨勢 + 停的時間
   const block = i => {
-    let word = '沒雨', end = null;
+    let word = '', end = null;
     for (let j = i; j < slots.length; j++) {
       if (!wet(slots[j])) { end = slots[j].start; break; }
       const w2 = level(slots[j].mm, slots[j].snow);
@@ -233,16 +248,21 @@ function analyze(w) {
     return { word, end };
   };
 
-  // 正在下
+  // ===== 現在正在下：大字顯示 小雨 / 中雨 / 大雨 / 雪 =====
+  const cur = slots[0];
   if (cur && wet(cur)) {
-    const b = block(0);
     const word = level(cur.mm, cur.snow);
+    const b = block(0);
     return Object.assign(base, {
-      mode: 'raining', snow: isSnow(word),
-      big: '正在' + word,
-      small: b.end ? '下到 ' + hm(b.end) : '會一直下'
+      kind: isSnow(word) ? 'snow' : 'rain',
+      big: word,
+      small: b.end ? '下到 ' + hm(b.end) + ' 停' : '會一直下'
     });
   }
+
+  // ===== 現在沒下：大字顯示 晴天 / 多雲 / 陰天 =====
+  const sky = skyWord(w.code, w.cloud);
+  const skyKind = sky === '晴天' ? 'sun' : 'cloud';
 
   // 8 小時內會下 (每 15 分鐘的預報)
   const fi = slots.findIndex(wet);
@@ -251,9 +271,8 @@ function analyze(w) {
     const b = block(fi);
     const min = Math.max(0, (first.start - now) / 60000);
     return Object.assign(base, {
-      mode: 'soon', snow: isSnow(b.word),
-      big: min < 10 ? '快' + b.word + '了' : minText(min) + '後 ' + b.word,
-      small: hm(first.start) + '～' + (b.end ? hm(b.end) : '很久')
+      kind: skyKind, big: sky,
+      small: (min < 10 ? '快' : minText(min) + '後 ') + b.word + '（' + hm(first.start) + '）'
     });
   }
 
@@ -264,45 +283,50 @@ function analyze(w) {
     const later = day[li];
     let lj = li;
     while (lj + 1 < day.length && hot(day[lj + 1])) lj++;
-    const endT = day[lj].start + 3600000;
     const seg = day.slice(li, lj + 1);
     const kinds = seg.filter(x => x.mm >= HOUR_RAIN).map(x => kindOf(x.mm, x.snow));
     const hasSnow = kinds.includes('snow'), hasMix = kinds.includes('mix'), hasRain = kinds.includes('rain');
     const word = hasMix || (hasSnow && hasRain) ? '雨夾雪' : hasSnow ? '下雪' : '下雨';
     return Object.assign(base, {
-      mode: 'dry', snow: word !== '下雨',
-      big: minText(Math.max(60, (later.start - now) / 60000)) + '後 ' + word,
-      small: hm(later.start) + '～' + hm(endT) + '（機率 ' + Math.max(...seg.map(x => x.prob)) + '%）'
+      kind: skyKind, big: sky,
+      small: minText(Math.max(60, (later.start - now) / 60000)) + '後 ' + word + '（' + hm(later.start) + '）'
     });
   }
-  return Object.assign(base, { mode: 'dry', big: '不會下雨', small: '未來 24 小時' });
+
+  return Object.assign(base, { kind: skyKind, big: sky, small: '24 小時不會下雨' });
 }
 
-// ---------- 畫降雨長條 + 每小時刻度 ----------
+// ---------- 畫降雨長條 + 刻度 ----------
 // 長條高度 = 降雨機率；深藍 = 真的會下雨，紫色 = 會下雪/雨夾雪，淺藍 = 只是有機率
-// 每一格下面有一條刻度線和那個小時的數字 (第一格 = 現在這一小時，用深色)
+// 底色：白天淡黃、晚上藍灰
+// 每小時一條刻度線；每 LABEL_EVERY 小時在刻度下面寫時間數字 (第一格 = 現在的小時，用深色)
 function drawDay(day, n, width, barH, fontSize) {
-  const tickH = 3;
-  const labelH = fontSize + 3;
-  const height = barH + tickH + labelH;
+  const tickH = 4, bigTickH = 7;
+  const labelH = fontSize + 4;
+  const height = barH + bigTickH + labelH;
   const dc = new DrawContext();
   dc.size = new Size(width, height);
   dc.opaque = false;
   dc.respectScreenScale = true;
   const gap = n > 12 ? 1.5 : 2.5;
   const bw = (width - gap * (n - 1)) / n;
+  const labelW = fontSize * 2.2;
 
   dc.setFont(Font.boldSystemFont(fontSize));
   dc.setTextAlignedCenter();
 
   for (let i = 0; i < n; i++) {
     const x = i * (bw + gap);
-    // 底色軌道
-    const track = new Path();
-    track.addRoundedRect(new Rect(x, 0, bw, barH), 2, 2);
-    dc.addPath(track); dc.setFillColor(C.track); dc.fillPath();
+    const cx = x + bw / 2;
 
     const d = day[i];
+
+    // 底色軌道 (白天 / 晚上不同顏色)
+    const track = new Path();
+    track.addRoundedRect(new Rect(x, 0, bw, barH), 2, 2);
+    const tc = !d || d.isDay == null ? C.track : d.isDay ? C.dayTrack : C.nightTrack;
+    dc.addPath(track); dc.setFillColor(tc); dc.fillPath();
+
     if (!d) continue;
 
     // 降雨長條
@@ -316,17 +340,21 @@ function drawDay(day, n, width, barH, fontSize) {
       dc.addPath(bar); dc.setFillColor(snowy ? C.snow : real ? C.rain : C.rainLight); dc.fillPath();
     }
 
-    // 刻度線
-    const cx = x + bw / 2;
+    // 刻度線 (要標字的那一格畫長一點)
+    const labeled = i % LABEL_EVERY === 0;
     const tick = new Path();
     tick.move(new Point(cx, barH + 1));
-    tick.addLine(new Point(cx, barH + tickH));
-    dc.addPath(tick); dc.setStrokeColor(C.tick); dc.setLineWidth(1); dc.strokePath();
+    tick.addLine(new Point(cx, barH + (labeled ? bigTickH : tickH)));
+    dc.addPath(tick); dc.setStrokeColor(labeled ? C.muted : C.tick); dc.setLineWidth(labeled ? 1.5 : 1); dc.strokePath();
 
-    // 小時數字
-    const hour = String(new Date(d.start).getHours());
-    dc.setTextColor(i === 0 ? C.ink : C.muted);
-    dc.drawTextInRect(hour, new Rect(x - gap / 2, barH + tickH, bw + gap, labelH));
+    // 時間數字
+    if (labeled) {
+      const text = String(new Date(d.start).getHours());
+      let lx = cx - labelW / 2;
+      lx = Math.max(0, Math.min(width - labelW, lx));   // 頭尾不要被切掉
+      dc.setTextColor(i === 0 ? C.ink : C.muted);
+      dc.drawTextInRect(text, new Rect(lx, barH + bigTickH, labelW, labelH));
+    }
   }
   return dc.getImage();
 }
@@ -341,61 +369,55 @@ function addText(stack, text, size, color, weight) {
   return t;
 }
 
-// 置中的一行字 (左右各放一個彈性空白)
-function centerText(stack, text, size) {
-  const row = stack.addStack();
-  row.addSpacer();
-  addText(row, text, size, C.muted, 'bold');
-  row.addSpacer();
-}
-
-const bigColor = r => r.snow ? C.snow : r.mode === 'dry' ? C.gold : C.rain;
+const bigColor = r => ({ sun: C.gold, cloud: C.cloud, rain: C.rain, snow: C.snow })[r.kind] || C.gold;
+const bgColor = r => r.kind === 'rain' ? C.rainBg : r.kind === 'snow' ? C.snowBg : C.bg;
 
 function buildWidget(r, place) {
   const w = new ListWidget();
-  w.backgroundColor = r.mode === 'raining' ? (r.snow ? C.snowBg : C.rainBg) : C.bg;
+  w.backgroundColor = bgColor(r);
   w.url = TAP_URL;
   w.refreshAfterDate = new Date(Date.now() + REFRESH_MIN * 60000);
   const family = config.widgetFamily || 'small';
+  const placeText = '📍' + place;
 
   if (family === 'small') {
     // ===== 正方形 =====
     w.setPadding(12, 12, 10, 12);
-    addText(w, r.big, 24, bigColor(r), 'heavy');
-    w.addSpacer(1);
-    addText(w, r.small, 18, C.ink, 'bold');
+    const top = w.addStack();
+    top.centerAlignContent();
+    addText(top, r.big, 26, bigColor(r), 'heavy');
+    top.addSpacer();
+    addText(top, placeText, 12, C.muted, 'bold');
+    w.addSpacer(2);
+    addText(w, r.small, 15, C.ink, 'bold');
     w.addSpacer();
-    const img = w.addImage(drawDay(r.day, SMALL_HOURS, 132, 36, 10));
-    img.imageSize = new Size(132, 36 + 3 + 13);
-    w.addSpacer(4);
-    centerText(w, place, 13);
+    const img = w.addImage(drawDay(r.day, SMALL_HOURS, 134, 40, 11));
+    img.imageSize = new Size(134, 40 + 7 + 15);
     return w;
   }
 
   // ===== 中 / 大 =====
-  // 第 1 行：不會下雨　未來 24 小時　　　　　　金竹里 (右上角)
-  // 第 2 行：24 小時降雨長條，從左到右整排 (每小時一格 + 時間)
+  // 第 1 行：晴天　3小時後 下雨（15:00）　　　📍金竹里
+  // 第 2 行：24 小時降雨長條 (從左到右整排)
   const isLarge = family === 'large' || family === 'extraLarge';
-  const chartW = 304;
-  const barH = isLarge ? 160 : 58;
-  const fontSize = isLarge ? 12 : 10;
-  w.setPadding(12, 12, 10, 12);
+  const chartW = 306;
+  const barH = isLarge ? 160 : 56;
+  const fontSize = isLarge ? 14 : 12;
+  w.setPadding(12, 12, 8, 12);
 
   const top = w.addStack();
   top.centerAlignContent();
-  addText(top, r.big, isLarge ? 32 : 26, bigColor(r), 'heavy');
-  top.addSpacer(8);
+  addText(top, r.big, isLarge ? 34 : 28, bigColor(r), 'heavy');
+  top.addSpacer(10);
   const sm = addText(top, r.small, isLarge ? 20 : 16, C.ink, 'bold');
   sm.minimumScaleFactor = 0.6;
   top.addSpacer();
-  const pl = addText(top, place, isLarge ? 16 : 14, C.muted, 'bold');
-  pl.rightAlignText();
+  addText(top, placeText, isLarge ? 16 : 14, C.muted, 'bold');
 
   w.addSpacer();
   const img = w.addImage(drawDay(r.day, WIDE_HOURS, chartW, barH, fontSize));
-  img.imageSize = new Size(chartW, barH + 3 + fontSize + 3);
+  img.imageSize = new Size(chartW, barH + 7 + fontSize + 4);
   img.centerAlignImage();
-  w.addSpacer(2);
   return w;
 }
 
@@ -449,7 +471,7 @@ if (!skip) {
   if (config.runsInWidget) {
     Script.setWidget(widget);
   } else {
-    await widget.presentSmall();
+    await widget.presentMedium();
   }
 }
 Script.complete();
