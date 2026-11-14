@@ -44,10 +44,14 @@ const C = {
 // ---------- 防止卡住：每一步都有時間限制 ----------
 // iPhone 小工具整支程式只能跑約 30 秒，超過就會出現 timeout 錯誤
 function withTimeout(promise, sec, fallback) {
-  return Promise.race([
-    promise.catch(() => fallback),
-    new Promise(res => Timer.schedule(sec * 1000, false, () => res(fallback)))
-  ]);
+  const safe = promise.catch(() => fallback);
+  let timer;
+  try {
+    timer = new Promise(res => Timer.schedule(sec * 1000, false, () => res(fallback)));
+  } catch (e) {
+    return safe;   // 這支 iPhone 不能用計時器，就直接等結果
+  }
+  return Promise.race([safe, timer]);
 }
 
 // ---------- 取得位置 (拿不到或太慢就用上次的位置) ----------
@@ -190,10 +194,10 @@ async function getWeather(lat, lon) {
     '&minutely_15=precipitation,rain,snowfall' +
     '&hourly=precipitation,precipitation_probability,rain,snowfall,is_day' +
     '&forecast_minutely_15=32&forecast_hours=26&past_minutely_15=1&timezone=auto';
-  // 天氣資料：最多等 12 秒；抓不到就用上次存下來的 (3 小時內)
+  // 天氣資料：最多等 12 秒；抓不到就用上次存下來的 (12 小時內)
   const fm = FileManager.local();
   const cache = fm.joinPath(fm.documentsDirectory(), 'rain_widget_weather.json');
-  let d = null;
+  let d = null, why = '';
   try {
     const req = new Request(url);
     req.timeoutInterval = 12;
@@ -201,14 +205,15 @@ async function getWeather(lat, lon) {
     if (d && !d.error && d.minutely_15) {
       fm.writeString(cache, JSON.stringify({ t: Date.now(), lat, lon, d }));
     } else {
+      why = d && d.reason ? d.reason : '';
       d = null;
     }
-  } catch (e) { d = null; }
+  } catch (e) { d = null; why = e.message || ''; }
   if (!d && fm.fileExists(cache)) {
     const c = JSON.parse(fm.readString(cache));
-    if (Date.now() - c.t < 3 * 3600000 && Math.abs(c.lat - lat) < 0.05 && Math.abs(c.lon - lon) < 0.05) d = c.d;
+    if (Date.now() - c.t < 12 * 3600000 && Math.abs(c.lat - lat) < 0.05 && Math.abs(c.lon - lon) < 0.05) d = c.d;
   }
-  if (!d) throw new Error('網路太慢，抓不到天氣');
+  if (!d) throw new Error('連不到天氣資料\n請確認 Scriptable 可以用行動數據' + (why ? '\n' + why : ''));
   const off = d.utc_offset_seconds || 0;
   const ms = s => {
     const p = s.split(/[-T:]/);
