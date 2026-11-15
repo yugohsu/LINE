@@ -6,6 +6,9 @@
 // 換地點：點一下小工具 → 選「搜尋地點」→ 輸入地名 → 選結果
 //         選「改回現在位置」就恢復用手機定位
 // 也可以長按小工具 →「編輯小工具」→ Parameter 輸入地名，那個小工具就固定看那裡 (優先)
+//
+// 看明天：點一下小工具 → 選「明天降雨」
+//         或另外加一個小工具，Parameter 輸入「明天」(也可以「明天 小樽」)，主畫面就一直顯示明天
 
 // ===== 可以自己改的地方 =====
 const APP_URL = 'https://yugohsu.github.io/LINE/';   // 選單裡「打開下雨通知」的網址
@@ -134,13 +137,15 @@ async function menu() {
   const a = new Alert();
   a.title = '多久下雨';
   a.message = '小工具現在看的是：' + (pick ? pick.name + '（固定地點）' : '現在位置');
+  a.addAction('明天降雨');
   a.addAction('搜尋地點');
   a.addAction('改回現在位置');
   a.addAction('打開下雨通知');
   a.addCancelAction('只看預覽');
   const i = await a.presentSheet();
 
-  if (i === 0) {
+  if (i === 0) return 'tomorrow';
+  if (i === 1) {
     const ask = new Alert();
     ask.title = '搜尋地點';
     ask.message = '輸入地名、景點或城市';
@@ -171,9 +176,9 @@ async function menu() {
       chosen = list[k];
     }
     Keychain.set(PICK_KEY, JSON.stringify({ name: chosen.name, lat: chosen.lat, lon: chosen.lon }));
-  } else if (i === 1) {
-    if (Keychain.contains(PICK_KEY)) Keychain.remove(PICK_KEY);
   } else if (i === 2) {
+    if (Keychain.contains(PICK_KEY)) Keychain.remove(PICK_KEY);
+  } else if (i === 3) {
     Safari.open(APP_URL);
     return 'open';
   }
@@ -233,6 +238,48 @@ async function getWeather(lat, lon) {
       isDay: (d.hourly.is_day || [])[i]
     }))
   };
+}
+
+// ---------- 抓明天的逐時天氣 ----------
+async function getTomorrow(lat, lon) {
+  const url = 'https://api.open-meteo.com/v1/forecast?latitude=' + lat.toFixed(4) + '&longitude=' + lon.toFixed(4) +
+    '&hourly=precipitation,precipitation_probability,snowfall,is_day' +
+    '&forecast_days=3&timezone=auto';
+  const fm = FileManager.local();
+  const cache = fm.joinPath(fm.documentsDirectory(), 'rain_widget_tomorrow.json');
+  let d = null, why = '';
+  try {
+    const req = new Request(url);
+    req.timeoutInterval = 15;
+    d = await req.loadJSON();
+    if (d && !d.error && d.hourly) {
+      fm.writeString(cache, JSON.stringify({ t: Date.now(), lat, lon, d }));
+    } else {
+      why = d && d.reason ? d.reason : '';
+      d = null;
+    }
+  } catch (e) { d = null; why = e.message || ''; }
+  if (!d && fm.fileExists(cache)) {
+    try {
+      const c = JSON.parse(fm.readString(cache));
+      if (Date.now() - c.t < 12 * 3600000 && Math.abs(c.lat - lat) < 0.05 && Math.abs(c.lon - lon) < 0.05) d = c.d;
+    } catch (e) {}
+  }
+  if (!d) throw new Error('連不到天氣資料' + (why ? '\n' + why.slice(0, 80) : ''));
+
+  const off = d.utc_offset_seconds || 0;
+  const ms = s => {
+    const p = s.split(/[-T:]/);
+    return Date.UTC(+p[0], +p[1] - 1, +p[2], +p[3], +p[4]) - off * 1000;
+  };
+  // 當地「明天 0 點」
+  const local = new Date(Date.now() + off * 1000);
+  const t0 = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() + 1) - off * 1000;
+  return d.hourly.time.map((t, i) => ({
+    end: ms(t), mm: d.hourly.precipitation[i] || 0, snow: d.hourly.snowfall[i] || 0,
+    prob: d.hourly.precipitation_probability[i] || 0, isDay: (d.hourly.is_day || [])[i]
+  })).filter(x => x.end > t0 && x.end <= t0 + 24 * 3600000)
+    .map(x => ({ start: x.end - 3600000, mm: x.mm, snow: x.snow, prob: x.prob, isDay: x.isDay }));
 }
 
 // ---------- 判斷 ----------
@@ -337,11 +384,33 @@ function analyze(w) {
   return Object.assign(base, { kind: skyKind, big: sky, small: '24 小時不會下雨' });
 }
 
+// 明天：大字「明天有雨 / 明天沒雨」，小字幾點開始下
+function analyzeTomorrow(day) {
+  const maxProb = day.reduce((a, x) => Math.max(a, x.prob), 0);
+  const hot = x => x.mm >= HOUR_RAIN || x.prob >= 60;
+  const li = day.findIndex(hot);
+  if (li < 0) {
+    return { day, tomorrow: true, kind: 'sun', big: '明天沒雨', small: '降雨機率最高 ' + maxProb + '%' };
+  }
+  let lj = li;
+  while (lj + 1 < day.length && hot(day[lj + 1])) lj++;
+  const seg = day.slice(li, lj + 1);
+  const kinds = day.filter(x => x.mm >= HOUR_RAIN).map(x => kindOf(x.mm, x.snow));
+  const snowy = kinds.includes('snow') || kinds.includes('mix');
+  const endT = day[lj].start + 3600000;
+  return {
+    day, tomorrow: true,
+    kind: snowy ? 'snow' : 'rain',
+    big: snowy ? '明天有雪' : '明天有雨',
+    small: hm(day[li].start) + '～' + hm(endT) + '（' + Math.max(...seg.map(x => x.prob)) + '%）'
+  };
+}
+
 // ---------- 畫降雨長條 + 刻度 ----------
 // 長條高度 = 降雨機率 (中間虛線 = 50%)；深藍 = 真的會下雨，紫色 = 會下雪/雨夾雪，淺藍 = 只是有機率
 // 底色：白天淡黃、晚上藍灰
 // 每小時一條刻度線；每 LABEL_EVERY 小時在刻度下面寫時間數字 (第一格 = 現在的小時，用深色)
-function drawDay(day, n, width, barH, fontSize) {
+function drawDay(day, n, width, barH, fontSize, showNow = true) {
   const tickH = 4, bigTickH = 7;
   const labelH = fontSize + 4;
   const height = barH + bigTickH + labelH;
@@ -394,7 +463,7 @@ function drawDay(day, n, width, barH, fontSize) {
       let lx = cx - labelW / 2;
       if (i === 0) { lx = 0; dc.setTextAlignedLeft(); }
       lx = Math.max(0, Math.min(width - labelW, lx));   // 頭尾不要被切掉
-      dc.setTextColor(i === 0 ? C.now : C.muted);
+      dc.setTextColor(i === 0 && showNow ? C.now : C.muted);
       dc.drawTextInRect(text, new Rect(lx, barH + bigTickH, labelW, labelH));
       dc.setTextAlignedCenter();
     }
@@ -411,10 +480,12 @@ function drawDay(day, n, width, barH, fontSize) {
     dc.addPath(dash); dc.strokePath();
   }
 
-  // 現在這一格：橘色框，一眼就看得到
-  const box = new Path();
-  box.addRoundedRect(new Rect(1.25, 1.25, bw - 2.5, barH - 2.5), 3, 3);
-  dc.addPath(box); dc.setStrokeColor(C.now); dc.setLineWidth(2.5); dc.strokePath();
+  // 現在這一格：橘色框，一眼就看得到 (看明天時不畫)
+  if (showNow) {
+    const box = new Path();
+    box.addRoundedRect(new Rect(1.25, 1.25, bw - 2.5, barH - 2.5), 3, 3);
+    dc.addPath(box); dc.setStrokeColor(C.now); dc.setLineWidth(2.5); dc.strokePath();
+  }
   return dc.getImage();
 }
 
@@ -429,7 +500,7 @@ function addText(stack, text, size, color, weight) {
 }
 
 const bigColor = r => ({ sun: C.gold, cloud: C.cloud, rain: C.rain, snow: C.snow })[r.kind] || C.gold;
-const bgColor = r => r.kind === 'rain' ? C.rainBg : r.kind === 'snow' ? C.snowBg : C.bg;
+const bgColor = r => r.tomorrow ? C.bg : r.kind === 'rain' ? C.rainBg : r.kind === 'snow' ? C.snowBg : C.bg;
 
 function buildWidget(r, place) {
   const w = new ListWidget();
@@ -452,7 +523,7 @@ function buildWidget(r, place) {
     addText(w, r.small, 15, C.ink, 'bold');
     w.addSpacer();
     const sw = widgetWidth('small') - PAD * 2;
-    const img = w.addImage(drawDay(r.day, SMALL_HOURS, sw, 40, 11));
+    const img = w.addImage(drawDay(r.day, r.tomorrow ? 24 : SMALL_HOURS, sw, 40, 11, !r.tomorrow));
     img.imageSize = new Size(sw, 40 + 7 + 15);
     img.leftAlignImage();
     return w;
@@ -477,7 +548,7 @@ function buildWidget(r, place) {
   addText(top, placeText, isLarge ? 16 : 14, C.muted, 'bold');
 
   w.addSpacer();
-  const img = w.addImage(drawDay(r.day, WIDE_HOURS, chartW, barH, fontSize));
+  const img = w.addImage(drawDay(r.day, WIDE_HOURS, chartW, barH, fontSize, !r.tomorrow));
   img.imageSize = new Size(chartW, barH + 7 + fontSize + 4);
   img.leftAlignImage();
   return w;
@@ -507,15 +578,22 @@ function errorWidget(msg) {
 // 點小工具 → 打開 Scriptable 跑這支程式 → 出現選單
 const TAP_URL = 'scriptable:///run/' + encodeURIComponent(Script.name());
 
-let skip = false;
+let skip = false, wantTomorrow = false;
 if (!config.runsInWidget) {
-  skip = (await menu()) === 'open';
+  const act = await menu();
+  skip = act === 'open';
+  wantTomorrow = act === 'tomorrow';
 }
 
 if (!skip) {
   let widget, step = '位置';
   try {
-    const param = String((config.runsInWidget ? args.widgetParameter : '') || '').trim();
+    let param = String((config.runsInWidget ? args.widgetParameter : '') || '').trim();
+    // Parameter 寫「明天」或「明天 小樽」→ 看明天
+    if (param.indexOf('明天') === 0) {
+      wantTomorrow = true;
+      param = param.slice(2).trim();
+    }
     const pick = getPick();
     let loc, place;
     if (param) {
@@ -532,9 +610,16 @@ if (!skip) {
       widget = errorWidget('拿不到位置\n請點小工具 → 搜尋地點\n或允許 Scriptable 定位');
     } else {
       step = '天氣';
-      const w = await getWeather(loc.latitude, loc.longitude);
-      step = '計算';
-      const r = analyze(w);
+      let r;
+      if (wantTomorrow) {
+        const day = await getTomorrow(loc.latitude, loc.longitude);
+        step = '計算';
+        r = analyzeTomorrow(day);
+      } else {
+        const w = await getWeather(loc.latitude, loc.longitude);
+        step = '計算';
+        r = analyze(w);
+      }
       step = '畫圖';
       widget = buildWidget(r, place);
     }
@@ -545,6 +630,8 @@ if (!skip) {
 
   if (config.runsInWidget) {
     Script.setWidget(widget);
+  } else if (wantTomorrow) {
+    await widget.presentLarge();   // 看明天用大張的，比較清楚
   } else {
     await widget.presentMedium();
   }
