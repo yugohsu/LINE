@@ -184,39 +184,30 @@ async function menu() {
   }
 }
 
-// ---------- 抓天氣 ----------
-async function getWeather(lat, lon) {
-  const url = 'https://api.open-meteo.com/v1/forecast?latitude=' + lat.toFixed(4) + '&longitude=' + lon.toFixed(4) +
+// ---------- 抓天氣 (兩個來源 + 重試 + 舊資料備援) ----------
+// 1. Open-Meteo (主要，有每 15 分鐘的預報)
+// 2. 挪威氣象局 MET Norway (備用，Open-Meteo 連不上時用)
+// 3. 都連不上 → 用 24 小時內最後一次成功的資料
+const START = Date.now();
+const BUDGET = config.runsInWidget ? 24000 : 45000;   // 小工具最多約 30 秒，留一點時間畫圖
+const left = () => BUDGET - (Date.now() - START);
+
+async function getJSON(url, sec, headers) {
+  const req = new Request(url);
+  req.timeoutInterval = Math.max(3, Math.min(sec, Math.floor(left() / 1000)));
+  if (headers) req.headers = headers;
+  return await req.loadJSON();
+}
+
+// Open-Meteo → 統一格式
+async function fromOpenMeteo(lat, lon, sec) {
+  const url = 'https://api.open-meteo.com/v1/forecast?latitude=' + lat.toFixed(3) + '&longitude=' + lon.toFixed(3) +
     '&current=weather_code,cloud_cover' +
-    '&minutely_15=precipitation,rain,snowfall' +
-    '&hourly=precipitation,precipitation_probability,rain,snowfall,is_day' +
-    '&forecast_minutely_15=32&forecast_hours=26&past_minutely_15=1&timezone=auto';
-  // 天氣資料：最多等 15 秒；抓不到就用上次存下來的 (24 小時內)
-  const fm = FileManager.local();
-  const cache = fm.joinPath(fm.documentsDirectory(), 'rain_widget_weather.json');
-  let d = null, why = '';
-  try {
-    const req = new Request(url);
-    req.timeoutInterval = 15;          // iPhone 自己的逾時，錯誤訊息會保留下來
-    d = await req.loadJSON();
-    if (d && !d.error && d.minutely_15) {
-      fm.writeString(cache, JSON.stringify({ t: Date.now(), lat, lon, d }));
-    } else {
-      why = d && d.reason ? d.reason : '';
-      d = null;
-    }
-  } catch (e) { d = null; why = e.message || ''; }
-  let staleAt = 0;   // 用的是舊資料時，記下那份資料的時間
-  if (!d && fm.fileExists(cache)) {
-    try {
-      const c = JSON.parse(fm.readString(cache));
-      if (Date.now() - c.t < 24 * 3600000 && Math.abs(c.lat - lat) < 0.05 && Math.abs(c.lon - lon) < 0.05) {
-        d = c.d;
-        staleAt = c.t;
-      }
-    } catch (e) {}
-  }
-  if (!d) throw new Error('連不到天氣資料' + (why ? '\n' + why.slice(0, 80) : ''));
+    '&minutely_15=precipitation,snowfall' +
+    '&hourly=precipitation,precipitation_probability,snowfall,is_day' +
+    '&forecast_minutely_15=32&forecast_hours=50&past_minutely_15=1&timezone=auto';
+  const d = await getJSON(url, sec);
+  if (!d || d.error || !d.hourly || !d.minutely_15) throw new Error((d && d.reason) || 'Open-Meteo 資料不完整');
   const off = d.utc_offset_seconds || 0;
   const ms = s => {
     const p = s.split(/[-T:]/);
@@ -224,61 +215,87 @@ async function getWeather(lat, lon) {
   };
   const cur = d.current || {};
   return {
-    staleAt,
+    off,
     code: cur.weather_code == null ? 0 : cur.weather_code,
     cloud: cur.cloud_cover == null ? 0 : cur.cloud_cover,
     m: d.minutely_15.time.map((t, i) => ({
-      end: ms(t), mm: d.minutely_15.precipitation[i] || 0, snow: d.minutely_15.snowfall[i] || 0,
-      rain: (d.minutely_15.rain || [])[i] || 0
+      end: ms(t), mm: d.minutely_15.precipitation[i] || 0, snow: d.minutely_15.snowfall[i] || 0
     })),
     h: d.hourly.time.map((t, i) => ({
       end: ms(t), mm: d.hourly.precipitation[i] || 0, snow: d.hourly.snowfall[i] || 0,
-      rain: (d.hourly.rain || [])[i] || 0,
-      prob: d.hourly.precipitation_probability[i] || 0,
-      isDay: (d.hourly.is_day || [])[i]
+      prob: d.hourly.precipitation_probability[i] || 0, isDay: (d.hourly.is_day || [])[i]
     }))
   };
 }
 
-// ---------- 抓明天的逐時天氣 ----------
-async function getTomorrow(lat, lon) {
-  const url = 'https://api.open-meteo.com/v1/forecast?latitude=' + lat.toFixed(4) + '&longitude=' + lon.toFixed(4) +
-    '&hourly=precipitation,precipitation_probability,snowfall,is_day' +
-    '&forecast_days=3&timezone=auto';
-  const fm = FileManager.local();
-  const cache = fm.joinPath(fm.documentsDirectory(), 'rain_widget_tomorrow.json');
-  let d = null, why = '';
-  try {
-    const req = new Request(url);
-    req.timeoutInterval = 15;
-    d = await req.loadJSON();
-    if (d && !d.error && d.hourly) {
-      fm.writeString(cache, JSON.stringify({ t: Date.now(), lat, lon, d }));
-    } else {
-      why = d && d.reason ? d.reason : '';
-      d = null;
+// MET Norway → 統一格式 (沒有 15 分鐘預報，就把每小時平均分成 4 格)
+async function fromMetNo(lat, lon, sec) {
+  const url = 'https://api.met.no/weatherapi/locationforecast/2.0/complete?lat=' + lat.toFixed(3) + '&lon=' + lon.toFixed(3);
+  const d = await getJSON(url, sec, { 'User-Agent': 'ScriptableRainWidget/1.0 github.com/yugohsu' });
+  const ts = d && d.properties && d.properties.timeseries;
+  if (!ts || !ts.length) throw new Error('MET 資料不完整');
+  const h = [], m = [];
+  let code = 1, cloud = 0;
+  ts.forEach((x, i) => {
+    const n1 = x.data.next_1_hours;
+    if (!n1) return;
+    const start = Date.parse(x.time);
+    const mm = n1.details.precipitation_amount || 0;
+    const temp = x.data.instant.details.air_temperature;
+    const snow = temp != null && temp <= 0.5 ? mm / 0.7 : 0;
+    const sym = (n1.summary && n1.summary.symbol_code) || '';
+    let prob = n1.details.probability_of_precipitation;
+    if (prob == null) prob = mm >= HOUR_RAIN ? 70 : mm > 0 ? 40 : 0;
+    h.push({ end: start + 3600000, mm, snow, prob: Math.round(prob), isDay: sym.indexOf('night') >= 0 ? 0 : 1 });
+    if (h.length === 1) {
+      cloud = x.data.instant.details.cloud_area_fraction || 0;
+      code = /fog|cloudy$/.test(sym.replace(/_(day|night|polartwilight)$/, '')) ? 3 : /partlycloudy/.test(sym) ? 2 : 1;
     }
-  } catch (e) { d = null; why = e.message || ''; }
-  if (!d && fm.fileExists(cache)) {
-    try {
-      const c = JSON.parse(fm.readString(cache));
-      if (Date.now() - c.t < 24 * 3600000 && Math.abs(c.lat - lat) < 0.05 && Math.abs(c.lon - lon) < 0.05) d = c.d;
-    } catch (e) {}
-  }
-  if (!d) throw new Error('連不到天氣資料' + (why ? '\n' + why.slice(0, 80) : ''));
+    if (h.length <= 8) for (let q = 1; q <= 4; q++) m.push({ end: start + q * 900000, mm: mm / 4, snow: snow / 4 });
+  });
+  return { off: -new Date().getTimezoneOffset() * 60, code, cloud, m, h };
+}
 
-  const off = d.utc_offset_seconds || 0;
-  const ms = s => {
-    const p = s.split(/[-T:]/);
-    return Date.UTC(+p[0], +p[1] - 1, +p[2], +p[3], +p[4]) - off * 1000;
-  };
-  // 當地「明天 0 點」
+async function getWeather(lat, lon) {
+  const fm = FileManager.local();
+  const cache = fm.joinPath(fm.documentsDirectory(), 'rain_widget_data.json');
+  let old = null;
+  try {
+    if (fm.fileExists(cache)) old = JSON.parse(fm.readString(cache));
+  } catch (e) {}
+  const samePlace = old && Math.abs(old.lat - lat) < 0.05 && Math.abs(old.lon - lon) < 0.05;
+
+  // 10 分鐘內剛抓過，直接用，不用再連網路
+  if (samePlace && Date.now() - old.t < 10 * 60000) return old.w;
+
+  const tries = [
+    ['Open-Meteo', () => fromOpenMeteo(lat, lon, 9)],
+    ['MET', () => fromMetNo(lat, lon, 9)],
+    ['Open-Meteo', () => fromOpenMeteo(lat, lon, 8)]
+  ];
+  const errs = [];
+  for (const [name, fn] of tries) {
+    if (left() < 4000) break;   // 時間不夠了就不要再試
+    try {
+      const w = await fn();
+      try { fm.writeString(cache, JSON.stringify({ t: Date.now(), lat, lon, w })); } catch (e) {}
+      return w;
+    } catch (e) {
+      errs.push(name + '：' + String((e && e.message) || e).slice(0, 40));
+    }
+  }
+  // 都失敗 → 24 小時內的舊資料
+  if (samePlace && Date.now() - old.t < 24 * 3600000) return old.w;
+  throw new Error('連不到天氣資料\n' + errs.join('\n'));
+}
+
+// ---------- 明天的逐時天氣 (跟今天用同一份資料) ----------
+async function getTomorrow(lat, lon) {
+  const w = await getWeather(lat, lon);
+  const off = w.off || 0;
   const local = new Date(Date.now() + off * 1000);
   const t0 = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() + 1) - off * 1000;
-  return d.hourly.time.map((t, i) => ({
-    end: ms(t), mm: d.hourly.precipitation[i] || 0, snow: d.hourly.snowfall[i] || 0,
-    prob: d.hourly.precipitation_probability[i] || 0, isDay: (d.hourly.is_day || [])[i]
-  })).filter(x => x.end > t0 && x.end <= t0 + 24 * 3600000)
+  return w.h.filter(x => x.end > t0 && x.end <= t0 + 24 * 3600000)
     .map(x => ({ start: x.end - 3600000, mm: x.mm, snow: x.snow, prob: x.prob, isDay: x.isDay }));
 }
 
@@ -322,7 +339,7 @@ function analyze(w) {
 
   // 未來 24 小時 (每小時一格；包含「現在這一小時」)
   const day = w.h.filter(x => x.end > now).slice(0, 24).map(x => ({ start: x.end - 3600000, mm: x.mm, snow: x.snow, prob: x.prob, isDay: x.isDay }));
-  const base = { day, staleAt: w.staleAt };
+  const base = { day };
   const rank = { '': 0, '小雨': 1, '中雨': 2, '大雨': 3, '雨夾雪': 4, '小雪': 5, '中雪': 6, '大雪': 7 };
 
   // 從第 i 格開始連續下的那一段：最大雨勢 + 停的時間
