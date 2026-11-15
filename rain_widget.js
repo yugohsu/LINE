@@ -538,10 +538,11 @@ function buildWidget(r, place) {
     addText(top, placeText, 12, C.muted, 'bold');
     w.addSpacer(2);
     addText(w, r.small, 15, C.ink, 'bold');
-    w.addSpacer();
-    const sw = widgetWidth('small') - PAD * 2;
-    const img = w.addImage(drawDay(r.day, r.tomorrow ? 24 : SMALL_HOURS, sw, 40, 11, !r.tomorrow));
-    img.imageSize = new Size(sw, 40 + 7 + 15);
+    w.addSpacer(6);
+    // 圖表不寫死寬度，讓 iPhone / iPad 自動縮放到剛好的大小
+    const img = w.addImage(drawDay(r.day, r.tomorrow ? 24 : SMALL_HOURS, 140, 40, 11, !r.tomorrow));
+    img.resizable = true;
+    img.applyFittingContentMode();
     img.leftAlignImage();
     return w;
   }
@@ -550,7 +551,7 @@ function buildWidget(r, place) {
   // 第 1 行：晴天　22:00 開始下雨　　　　　📍金竹里
   // 第 2 行：24 小時降雨長條 (從左到右整排)
   const isLarge = family === 'large' || family === 'extraLarge';
-  const chartW = widgetWidth('medium') - PAD * 2;   // 長條佔滿整個寬度
+  const chartW = 300;                               // 畫圖的基準寬度，實際大小會自動縮放
   const barH = isLarge ? 160 : 56;
   const fontSize = isLarge ? 14 : 12;
   w.setPadding(12, PAD, 8, PAD);
@@ -564,18 +565,13 @@ function buildWidget(r, place) {
   top.addSpacer();
   addText(top, placeText, isLarge ? 16 : 14, C.muted, 'bold');
 
-  w.addSpacer();
+  w.addSpacer(6);
+  // 圖表不寫死寬度，讓 iPhone / iPad 自動縮放到剛好的大小
   const img = w.addImage(drawDay(r.day, WIDE_HOURS, chartW, barH, fontSize, !r.tomorrow));
-  img.imageSize = new Size(chartW, barH + 7 + fontSize + 4);
+  img.resizable = true;
+  img.applyFittingContentMode();
   img.leftAlignImage();
   return w;
-}
-
-// 依手機螢幕寬度，估計小工具的寬度 (點)
-function widgetWidth(kind) {
-  const sw = Device.screenSize().width;
-  const sizes = sw >= 428 ? [170, 364] : sw >= 414 ? [169, 360] : sw >= 393 ? [158, 338] : sw >= 390 ? [158, 338] : sw >= 375 ? [155, 329] : [141, 292];
-  return kind === 'small' ? sizes[0] : sizes[1];
 }
 
 function errorWidget(msg) {
