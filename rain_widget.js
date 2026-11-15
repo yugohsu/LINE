@@ -191,7 +191,7 @@ async function getWeather(lat, lon) {
     '&minutely_15=precipitation,rain,snowfall' +
     '&hourly=precipitation,precipitation_probability,rain,snowfall,is_day' +
     '&forecast_minutely_15=32&forecast_hours=26&past_minutely_15=1&timezone=auto';
-  // 天氣資料：最多等 15 秒；抓不到就用上次存下來的 (12 小時內)
+  // 天氣資料：最多等 15 秒；抓不到就用上次存下來的 (24 小時內)
   const fm = FileManager.local();
   const cache = fm.joinPath(fm.documentsDirectory(), 'rain_widget_weather.json');
   let d = null, why = '';
@@ -210,7 +210,7 @@ async function getWeather(lat, lon) {
   if (!d && fm.fileExists(cache)) {
     try {
       const c = JSON.parse(fm.readString(cache));
-      if (Date.now() - c.t < 12 * 3600000 && Math.abs(c.lat - lat) < 0.05 && Math.abs(c.lon - lon) < 0.05) {
+      if (Date.now() - c.t < 24 * 3600000 && Math.abs(c.lat - lat) < 0.05 && Math.abs(c.lon - lon) < 0.05) {
         d = c.d;
         staleAt = c.t;
       }
@@ -262,7 +262,7 @@ async function getTomorrow(lat, lon) {
   if (!d && fm.fileExists(cache)) {
     try {
       const c = JSON.parse(fm.readString(cache));
-      if (Date.now() - c.t < 12 * 3600000 && Math.abs(c.lat - lat) < 0.05 && Math.abs(c.lon - lon) < 0.05) d = c.d;
+      if (Date.now() - c.t < 24 * 3600000 && Math.abs(c.lat - lat) < 0.05 && Math.abs(c.lon - lon) < 0.05) d = c.d;
     } catch (e) {}
   }
   if (!d) throw new Error('連不到天氣資料' + (why ? '\n' + why.slice(0, 80) : ''));
