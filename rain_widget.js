@@ -37,51 +37,41 @@ const C = {
   dayTrack: new Color('#f3e1ad'),    // 白天的底色：淡黃
   nightTrack: new Color('#cfd0e3'),  // 晚上的底色：藍灰
   tick: new Color('#a89c88'),
+  half: new Color('#5b5247', 0.55), // 50% 虛線
   now: new Color('#e2662d'),        // 現在這一格：橘色框
   red: new Color('#c24a36')
 };
 
-// ---------- 防止卡住：每一步都有時間限制 ----------
-// iPhone 小工具整支程式只能跑約 30 秒，超過就會出現 timeout 錯誤
-function withTimeout(promise, sec, fallback) {
-  const safe = promise.catch(() => fallback);
-  let timer;
-  try {
-    timer = new Promise(res => Timer.schedule(sec * 1000, false, () => res(fallback)));
-  } catch (e) {
-    return safe;   // 這支 iPhone 不能用計時器，就直接等結果
-  }
-  return Promise.race([safe, timer]);
-}
-
-// ---------- 取得位置 (拿不到或太慢就用上次的位置) ----------
+// ---------- 取得位置 (拿不到就用上次的位置) ----------
+// 注意：不使用 Timer 計時器 —— 在 Scriptable 裡它會讓等待提早結束，造成「連不到天氣資料」
 async function getLocation() {
   const saved = Keychain.contains('rain_widget_loc') ? JSON.parse(Keychain.get('rain_widget_loc')) : null;
   try {
     Location.setAccuracyToKilometer();   // 公里級就夠了，比較快
+    const loc = await Location.current();
+    if (loc && loc.latitude) {
+      const v = { latitude: loc.latitude, longitude: loc.longitude };
+      Keychain.set('rain_widget_loc', JSON.stringify(v));
+      return v;
+    }
   } catch (e) {}
-  const loc = await withTimeout(Location.current(), 6, null);
-  if (loc && loc.latitude) {
-    const v = { latitude: loc.latitude, longitude: loc.longitude };
-    Keychain.set('rain_widget_loc', JSON.stringify(v));
-    return v;
-  }
   return saved;
 }
 
-// 地名 (查過的位置會記住，太慢就用上次的)
+// 地名 (位置沒變就用記住的，不重查)
 async function getPlaceName(lat, lon) {
   const key = 'rain_widget_place';
   const saved = Keychain.contains(key) ? JSON.parse(Keychain.get(key)) : null;
-  // 和上次位置差不到約 1 公里，直接用上次的地名
   if (saved && Math.abs(saved.lat - lat) < 0.01 && Math.abs(saved.lon - lon) < 0.01) return saved.name;
-  const r = await withTimeout(Location.reverseGeocode(lat, lon, 'zh_TW'), 4, null);
-  const p = r && r[0];
-  const name = p ? (p.subLocality || p.locality || p.administrativeArea || '') : '';
-  if (name) {
-    Keychain.set(key, JSON.stringify({ lat, lon, name }));
-    return name;
-  }
+  try {
+    const r = await Location.reverseGeocode(lat, lon, 'zh_TW');
+    const p = r && r[0];
+    const name = p ? (p.subLocality || p.locality || p.administrativeArea || '') : '';
+    if (name) {
+      Keychain.set(key, JSON.stringify({ lat, lon, name }));
+      return name;
+    }
+  } catch (e) {}
   return saved ? saved.name : '';
 }
 
@@ -105,7 +95,9 @@ async function findPlace(name) {
   // 2. 備用：Open-Meteo 地名搜尋
   if (!found) {
     try {
-      const r = await new Request('https://geocoding-api.open-meteo.com/v1/search?count=1&language=zh&name=' + encodeURIComponent(name)).loadJSON();
+      const rq2 = new Request('https://geocoding-api.open-meteo.com/v1/search?count=1&language=zh&name=' + encodeURIComponent(name));
+      rq2.timeoutInterval = 8;
+      const r = await rq2.loadJSON();
       const g = r && r.results && r.results[0];
       if (g) found = { latitude: g.latitude, longitude: g.longitude };
     } catch (e) {}
@@ -194,14 +186,14 @@ async function getWeather(lat, lon) {
     '&minutely_15=precipitation,rain,snowfall' +
     '&hourly=precipitation,precipitation_probability,rain,snowfall,is_day' +
     '&forecast_minutely_15=32&forecast_hours=26&past_minutely_15=1&timezone=auto';
-  // 天氣資料：最多等 12 秒；抓不到就用上次存下來的 (12 小時內)
+  // 天氣資料：最多等 15 秒；抓不到就用上次存下來的 (12 小時內)
   const fm = FileManager.local();
   const cache = fm.joinPath(fm.documentsDirectory(), 'rain_widget_weather.json');
   let d = null, why = '';
   try {
     const req = new Request(url);
-    req.timeoutInterval = 12;
-    d = await withTimeout(req.loadJSON(), 13, null);
+    req.timeoutInterval = 15;          // iPhone 自己的逾時，錯誤訊息會保留下來
+    d = await req.loadJSON();
     if (d && !d.error && d.minutely_15) {
       fm.writeString(cache, JSON.stringify({ t: Date.now(), lat, lon, d }));
     } else {
@@ -209,11 +201,17 @@ async function getWeather(lat, lon) {
       d = null;
     }
   } catch (e) { d = null; why = e.message || ''; }
+  let staleAt = 0;   // 用的是舊資料時，記下那份資料的時間
   if (!d && fm.fileExists(cache)) {
-    const c = JSON.parse(fm.readString(cache));
-    if (Date.now() - c.t < 12 * 3600000 && Math.abs(c.lat - lat) < 0.05 && Math.abs(c.lon - lon) < 0.05) d = c.d;
+    try {
+      const c = JSON.parse(fm.readString(cache));
+      if (Date.now() - c.t < 12 * 3600000 && Math.abs(c.lat - lat) < 0.05 && Math.abs(c.lon - lon) < 0.05) {
+        d = c.d;
+        staleAt = c.t;
+      }
+    } catch (e) {}
   }
-  if (!d) throw new Error('連不到天氣資料\n請確認 Scriptable 可以用行動數據' + (why ? '\n' + why : ''));
+  if (!d) throw new Error('連不到天氣資料' + (why ? '\n' + why.slice(0, 80) : ''));
   const off = d.utc_offset_seconds || 0;
   const ms = s => {
     const p = s.split(/[-T:]/);
@@ -221,6 +219,7 @@ async function getWeather(lat, lon) {
   };
   const cur = d.current || {};
   return {
+    staleAt,
     code: cur.weather_code == null ? 0 : cur.weather_code,
     cloud: cur.cloud_cover == null ? 0 : cur.cloud_cover,
     m: d.minutely_15.time.map((t, i) => ({
@@ -276,7 +275,7 @@ function analyze(w) {
 
   // 未來 24 小時 (每小時一格；包含「現在這一小時」)
   const day = w.h.filter(x => x.end > now).slice(0, 24).map(x => ({ start: x.end - 3600000, mm: x.mm, snow: x.snow, prob: x.prob, isDay: x.isDay }));
-  const base = { day };
+  const base = { day, staleAt: w.staleAt };
   const rank = { '': 0, '小雨': 1, '中雨': 2, '大雨': 3, '雨夾雪': 4, '小雪': 5, '中雪': 6, '大雪': 7 };
 
   // 從第 i 格開始連續下的那一段：最大雨勢 + 停的時間
@@ -339,7 +338,7 @@ function analyze(w) {
 }
 
 // ---------- 畫降雨長條 + 刻度 ----------
-// 長條高度 = 降雨機率；深藍 = 真的會下雨，紫色 = 會下雪/雨夾雪，淺藍 = 只是有機率
+// 長條高度 = 降雨機率 (中間虛線 = 50%)；深藍 = 真的會下雨，紫色 = 會下雪/雨夾雪，淺藍 = 只是有機率
 // 底色：白天淡黃、晚上藍灰
 // 每小時一條刻度線；每 LABEL_EVERY 小時在刻度下面寫時間數字 (第一格 = 現在的小時，用深色)
 function drawDay(day, n, width, barH, fontSize) {
@@ -399,6 +398,17 @@ function drawDay(day, n, width, barH, fontSize) {
       dc.drawTextInRect(text, new Rect(lx, barH + bigTickH, labelW, labelH));
       dc.setTextAlignedCenter();
     }
+  }
+
+  // 50% 虛線：長條超過這條線 = 降雨機率超過一半
+  const midY = barH / 2;
+  dc.setStrokeColor(C.half);
+  dc.setLineWidth(1);
+  for (let x = 0; x < width; x += 6) {
+    const dash = new Path();
+    dash.move(new Point(x, midY));
+    dash.addLine(new Point(Math.min(x + 3, width), midY));
+    dc.addPath(dash); dc.strokePath();
   }
 
   // 現在這一格：橘色框，一眼就看得到
@@ -484,7 +494,7 @@ function errorWidget(msg) {
   const w = new ListWidget();
   w.backgroundColor = C.bg;
   w.url = TAP_URL;
-  w.refreshAfterDate = new Date(Date.now() + REFRESH_MIN * 60000);
+  w.refreshAfterDate = new Date(Date.now() + 5 * 60000);   // 失敗時 5 分鐘後再試
   addText(w, '多久會下雨', 16, C.muted, 'bold');
   w.addSpacer(6);
   const t = w.addText(msg);
@@ -503,7 +513,7 @@ if (!config.runsInWidget) {
 }
 
 if (!skip) {
-  let widget;
+  let widget, step = '位置';
   try {
     const param = String((config.runsInWidget ? args.widgetParameter : '') || '').trim();
     const pick = getPick();
@@ -521,10 +531,16 @@ if (!skip) {
     if (!loc) {
       widget = errorWidget('拿不到位置\n請點小工具 → 搜尋地點\n或允許 Scriptable 定位');
     } else {
-      widget = buildWidget(analyze(await getWeather(loc.latitude, loc.longitude)), place);
+      step = '天氣';
+      const w = await getWeather(loc.latitude, loc.longitude);
+      step = '計算';
+      const r = analyze(w);
+      step = '畫圖';
+      widget = buildWidget(r, place);
     }
   } catch (e) {
-    widget = errorWidget(e.message.indexOf('找不到') === 0 ? e.message : '更新失敗，稍後會再試\n' + e.message);
+    const msg = String((e && e.message) || e);
+    widget = errorWidget(msg.indexOf('找不到') === 0 ? msg : '更新失敗（' + step + '），稍後會再試\n' + msg);
   }
 
   if (config.runsInWidget) {
