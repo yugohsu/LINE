@@ -205,6 +205,7 @@ async function fromOpenMeteo(lat, lon, sec) {
     '&current=weather_code,cloud_cover' +
     '&minutely_15=precipitation,snowfall' +
     '&hourly=precipitation,precipitation_probability,snowfall,is_day' +
+    '&daily=temperature_2m_max,temperature_2m_min' +
     '&forecast_minutely_15=32&forecast_hours=50&past_minutely_15=1&timezone=auto';
   const d = await getJSON(url, sec);
   if (!d || d.error || !d.hourly || !d.minutely_15) throw new Error((d && d.reason) || 'Open-Meteo 資料不完整');
@@ -214,8 +215,14 @@ async function fromOpenMeteo(lat, lon, sec) {
     return Date.UTC(+p[0], +p[1] - 1, +p[2], +p[3], +p[4]) - off * 1000;
   };
   const cur = d.current || {};
+  // 每天的最低 / 最高溫：{ '2026-11-19': [12, 20], ... }
+  const temps = {};
+  if (d.daily && d.daily.time) d.daily.time.forEach((t, i) => {
+    const lo = d.daily.temperature_2m_min[i], hi = d.daily.temperature_2m_max[i];
+    if (lo != null && hi != null) temps[t] = [lo, hi];
+  });
   return {
-    off,
+    off, temps,
     code: cur.weather_code == null ? 0 : cur.weather_code,
     cloud: cur.cloud_cover == null ? 0 : cur.cloud_cover,
     m: d.minutely_15.time.map((t, i) => ({
@@ -234,9 +241,16 @@ async function fromMetNo(lat, lon, sec) {
   const d = await getJSON(url, sec, { 'User-Agent': 'ScriptableRainWidget/1.0 github.com/yugohsu' });
   const ts = d && d.properties && d.properties.timeseries;
   if (!ts || !ts.length) throw new Error('MET 資料不完整');
-  const h = [], m = [];
+  const h = [], m = [], temps = {};
+  const offMet = -new Date().getTimezoneOffset() * 60;
   let code = 1, cloud = 0;
   ts.forEach((x, i) => {
+    // 每天的最低 / 最高溫 (用當地日期分組)
+    const tc = x.data.instant.details.air_temperature;
+    if (tc != null) {
+      const k = new Date(Date.parse(x.time) + offMet * 1000).toISOString().slice(0, 10);
+      temps[k] = temps[k] ? [Math.min(temps[k][0], tc), Math.max(temps[k][1], tc)] : [tc, tc];
+    }
     const n1 = x.data.next_1_hours;
     if (!n1) return;
     const start = Date.parse(x.time);
@@ -253,7 +267,7 @@ async function fromMetNo(lat, lon, sec) {
     }
     if (h.length <= 8) for (let q = 1; q <= 4; q++) m.push({ end: start + q * 900000, mm: mm / 4, snow: snow / 4 });
   });
-  return { off: -new Date().getTimezoneOffset() * 60, code, cloud, m, h };
+  return { off: offMet, temps, code, cloud, m, h };
 }
 
 async function getWeather(lat, lon) {
@@ -289,14 +303,24 @@ async function getWeather(lat, lon) {
   throw new Error('連不到天氣資料\n' + errs.join('\n'));
 }
 
+// ---------- 某一天的最低 / 最高溫 (0 = 今天，1 = 明天) ----------
+function tempsOf(w, plusDays) {
+  if (!w || !w.temps) return null;
+  const local = new Date(Date.now() + (w.off || 0) * 1000);
+  const k = new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() + plusDays)).toISOString().slice(0, 10);
+  const v = w.temps[k];
+  return v ? { lo: Math.round(v[0]), hi: Math.round(v[1]) } : null;
+}
+
 // ---------- 明天的逐時天氣 (跟今天用同一份資料) ----------
 async function getTomorrow(lat, lon) {
   const w = await getWeather(lat, lon);
   const off = w.off || 0;
   const local = new Date(Date.now() + off * 1000);
   const t0 = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() + 1) - off * 1000;
-  return w.h.filter(x => x.end > t0 && x.end <= t0 + 24 * 3600000)
+  const day = w.h.filter(x => x.end > t0 && x.end <= t0 + 24 * 3600000)
     .map(x => ({ start: x.end - 3600000, mm: x.mm, snow: x.snow, prob: x.prob, isDay: x.isDay }));
+  return { day, temp: tempsOf(w, 1) };
 }
 
 // ---------- 判斷 ----------
@@ -519,6 +543,22 @@ function addText(stack, text, size, color, weight) {
 const bigColor = r => ({ sun: C.gold, cloud: C.cloud, rain: C.rain, snow: C.snow })[r.kind] || C.gold;
 const bgColor = r => r.tomorrow ? C.bg : r.kind === 'rain' ? C.rainBg : r.kind === 'snow' ? C.snowBg : C.bg;
 
+// 最上面一行：最低溫 (藍) / 最高溫 (橘)，右邊放地點
+function tempRow(w, r, placeText, size, placeSize) {
+  const row = w.addStack();
+  row.centerAlignContent();
+  if (r.temp) {
+    addText(row, '最低 ', size * 0.8, C.muted, 'bold');
+    addText(row, r.temp.lo + '°', size, C.rain, 'heavy');
+    row.addSpacer(10);
+    addText(row, '最高 ', size * 0.8, C.muted, 'bold');
+    addText(row, r.temp.hi + '°', size, C.now, 'heavy');
+  }
+  row.addSpacer();
+  addText(row, placeText, placeSize, C.muted, 'bold');
+  return row;
+}
+
 function buildWidget(r, place) {
   const w = new ListWidget();
   w.backgroundColor = bgColor(r);
@@ -530,13 +570,22 @@ function buildWidget(r, place) {
 
   if (family === 'small') {
     // ===== 正方形 =====
-    w.setPadding(12, PAD, 10, PAD);
-    const top = w.addStack();
-    top.centerAlignContent();
-    addText(top, r.big, 26, bigColor(r), 'heavy');
-    top.addSpacer();
-    addText(top, placeText, 12, C.muted, 'bold');
+    w.setPadding(10, PAD, 10, PAD);
+    // 第 1 行：最低 / 最高溫 (地點太長會自動縮小)
+    if (r.temp) {
+      const tr = w.addStack();
+      tr.centerAlignContent();
+      addText(tr, r.temp.lo + '°', 16, C.rain, 'heavy');
+      addText(tr, ' / ', 14, C.muted, 'bold');
+      addText(tr, r.temp.hi + '°', 16, C.now, 'heavy');
+      tr.addSpacer();
+      addText(tr, placeText, 11, C.muted, 'bold');
+    } else {
+      addText(w, placeText, 11, C.muted, 'bold');
+    }
     w.addSpacer(2);
+    addText(w, r.big, 24, bigColor(r), 'heavy');
+    w.addSpacer(1);
     addText(w, r.small, 15, C.ink, 'bold');
     w.addSpacer(6);
     // 圖表不寫死寬度，讓 iPhone / iPad 自動縮放到剛好的大小
@@ -548,24 +597,27 @@ function buildWidget(r, place) {
   }
 
   // ===== 中 / 大 =====
-  // 第 1 行：晴天　22:00 開始下雨　　　　　📍金竹里
-  // 第 2 行：24 小時降雨長條 (從左到右整排)
+  // 第 1 行：最低 12°  最高 20°　　　　　　📍金竹里
+  // 第 2 行：晴天　22:00 開始下雨
+  // 第 3 行：24 小時降雨長條 (從左到右整排)
   const isLarge = family === 'large' || family === 'extraLarge';
   const chartW = 300;                               // 畫圖的基準寬度，實際大小會自動縮放
   const barH = isLarge ? 160 : 56;
   const fontSize = isLarge ? 14 : 12;
-  w.setPadding(12, PAD, 8, PAD);
+  w.setPadding(10, PAD, 8, PAD);
+
+  tempRow(w, r, placeText, isLarge ? 22 : 17, isLarge ? 16 : 14);
+  w.addSpacer(2);
 
   const top = w.addStack();
   top.centerAlignContent();
-  addText(top, r.big, isLarge ? 34 : 28, bigColor(r), 'heavy');
+  addText(top, r.big, isLarge ? 34 : 26, bigColor(r), 'heavy');
   top.addSpacer(10);
   const sm = addText(top, r.small, isLarge ? 20 : 16, C.ink, 'bold');
   sm.minimumScaleFactor = 0.6;
   top.addSpacer();
-  addText(top, placeText, isLarge ? 16 : 14, C.muted, 'bold');
 
-  w.addSpacer(6);
+  w.addSpacer(4);
   // 圖表不寫死寬度，讓 iPhone / iPad 自動縮放到剛好的大小
   const img = w.addImage(drawDay(r.day, WIDE_HOURS, chartW, barH, fontSize, !r.tomorrow));
   img.resizable = true;
@@ -625,13 +677,15 @@ if (!skip) {
       step = '天氣';
       let r;
       if (wantTomorrow) {
-        const day = await getTomorrow(loc.latitude, loc.longitude);
+        const t = await getTomorrow(loc.latitude, loc.longitude);
         step = '計算';
-        r = analyzeTomorrow(day);
+        r = analyzeTomorrow(t.day);
+        r.temp = t.temp;
       } else {
         const w = await getWeather(loc.latitude, loc.longitude);
         step = '計算';
         r = analyze(w);
+        r.temp = tempsOf(w, 0);
       }
       step = '畫圖';
       widget = buildWidget(r, place);
