@@ -21,6 +21,7 @@ const WIDE_HOURS = 24;                                // 長方形小工具顯�
 const LABEL_EVERY = 3;                                // 每幾小時標一次時間數字 (1 = 每小時都標，字會比較小)
 const PAD = 16;                                       // 小工具左右留白 (大字和長條的第一格會對齊)
 const REFRESH_MIN = 10;                               // 希望幾分鐘更新一次 (iPhone 會自己決定，通常 10~30 分)
+const TEMP_CENTER = false;                            // false = 溫度和天氣同一行；true = 溫度放在長條圖上方置中
 // 下雨通知 Apps Script 網址 (用來把中文地名換成經緯度)
 const GAS_URL = 'https://script.google.com/macros/s/AKfycbwGL9LSy0zDw0fS83oVSOL-RSoce7PQUjJQgvs216_TqxmF3VEbNTH7yOlSiEV9mc6dWg/exec';
 
@@ -543,20 +544,14 @@ function addText(stack, text, size, color, weight) {
 const bigColor = r => ({ sun: C.gold, cloud: C.cloud, rain: C.rain, snow: C.snow })[r.kind] || C.gold;
 const bgColor = r => r.tomorrow ? C.bg : r.kind === 'rain' ? C.rainBg : r.kind === 'snow' ? C.snowBg : C.bg;
 
-// 最上面一行：最低溫 (藍) / 最高溫 (橘)，右邊放地點
-function tempRow(w, r, placeText, size, placeSize) {
-  const row = w.addStack();
-  row.centerAlignContent();
-  if (r.temp) {
-    addText(row, '最低 ', size * 0.8, C.muted, 'bold');
-    addText(row, r.temp.lo + '°', size, C.rain, 'heavy');
-    row.addSpacer(10);
-    addText(row, '最高 ', size * 0.8, C.muted, 'bold');
-    addText(row, r.temp.hi + '°', size, C.now, 'heavy');
-  }
-  row.addSpacer();
-  addText(row, placeText, placeSize, C.muted, 'bold');
-  return row;
+// 溫度：16°-21° (低溫藍、高溫橘)
+function addTemp(stack, r, size) {
+  if (!r.temp) return;
+  const s = stack.addStack();
+  s.centerAlignContent();
+  addText(s, r.temp.lo + '°', size, C.rain, 'heavy');
+  addText(s, '-', size, C.muted, 'heavy');
+  addText(s, r.temp.hi + '°', size, C.now, 'heavy');
 }
 
 function buildWidget(r, place) {
@@ -575,9 +570,7 @@ function buildWidget(r, place) {
     if (r.temp) {
       const tr = w.addStack();
       tr.centerAlignContent();
-      addText(tr, r.temp.lo + '°', 16, C.rain, 'heavy');
-      addText(tr, ' / ', 14, C.muted, 'bold');
-      addText(tr, r.temp.hi + '°', 16, C.now, 'heavy');
+      addTemp(tr, r, 16);
       tr.addSpacer();
       addText(tr, placeText, 11, C.muted, 'bold');
     } else {
@@ -597,27 +590,40 @@ function buildWidget(r, place) {
   }
 
   // ===== 中 / 大 =====
-  // 第 1 行：最低 12°  最高 20°　　　　　　📍金竹里
-  // 第 2 行：晴天　22:00 開始下雨
-  // 第 3 行：24 小時降雨長條 (從左到右整排)
+  // TEMP_CENTER = false：
+  //   第 1 行：小雨　14:00 停　　16°-21°　📍金竹里
+  // TEMP_CENTER = true：
+  //   第 1 行：小雨　14:00 停　　　　　📍金竹里
+  //   第 2 行：　　　　　16°-21°　　　　　(置中)
+  // 最後：24 小時降雨長條 (從左到右整排)
   const isLarge = family === 'large' || family === 'extraLarge';
   const chartW = 300;                               // 畫圖的基準寬度，實際大小會自動縮放
   const barH = isLarge ? 160 : 56;
   const fontSize = isLarge ? 14 : 12;
   w.setPadding(10, PAD, 8, PAD);
 
-  tempRow(w, r, placeText, isLarge ? 22 : 17, isLarge ? 16 : 14);
-  w.addSpacer(2);
-
   const top = w.addStack();
   top.centerAlignContent();
   addText(top, r.big, isLarge ? 34 : 26, bigColor(r), 'heavy');
-  top.addSpacer(10);
+  top.addSpacer(8);
   const sm = addText(top, r.small, isLarge ? 20 : 16, C.ink, 'bold');
   sm.minimumScaleFactor = 0.6;
   top.addSpacer();
+  if (!TEMP_CENTER) {
+    addTemp(top, r, isLarge ? 24 : 18);
+    top.addSpacer(8);
+  }
+  addText(top, placeText, isLarge ? 16 : 14, C.muted, 'bold');
 
-  w.addSpacer(4);
+  if (TEMP_CENTER && r.temp) {
+    w.addSpacer(2);
+    const mid = w.addStack();
+    mid.addSpacer();
+    addTemp(mid, r, isLarge ? 26 : 20);
+    mid.addSpacer();
+  }
+
+  w.addSpacer(6);
   // 圖表不寫死寬度，讓 iPhone / iPad 自動縮放到剛好的大小
   const img = w.addImage(drawDay(r.day, WIDE_HOURS, chartW, barH, fontSize, !r.tomorrow));
   img.resizable = true;
